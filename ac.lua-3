@@ -1,0 +1,261 @@
+-- Wavecrest Casino Account Computer
+-- Nearest player detection (no distance limit)
+-- Deposit & Withdraw UI on monitor
+
+local depositChest = peripheral.wrap("minecraft:chest_389")
+local withdrawalChest = peripheral.wrap("minecraft:chest_388")
+local payoutChest = peripheral.wrap("minecraft:chest_390")
+local monitor = peripheral.find("monitor")
+local radar = peripheral.find("radar")
+local logger = require("logger")
+
+local API_URL = "https://a8410f940b59.ngrok-free.app/balance/"
+
+local VALID_BOOKS = {
+    ["01cf97"] = 500,
+    ["e61758"] = 1000,
+    ["1fafe1"] = 5000,
+    ["6d281b"] = 10000,
+    ["dd703d"] = 15000
+}
+local COIN_ORDER = {15000, 10000, 5000, 1000, 500}
+
+local function getBalance(username)
+    local res = http.get(API_URL .. username)
+    if not res then return nil end
+    local data = textutils.unserializeJSON(res.readAll())
+    res.close()
+    return data and data.coins or 0
+end
+
+local function setBalance(username, amount)
+    local body = textutils.serializeJSON({ coins = amount })
+    http.post(API_URL .. username, body, { ["Content-Type"] = "application/json" })
+end
+
+local function giveBooks(amount)
+    local prefixMap = {}
+    for hash, val in pairs(VALID_BOOKS) do
+        prefixMap[val] = hash
+    end
+
+    for _, denom in ipairs(COIN_ORDER) do
+        while amount >= denom do
+            local list = payoutChest.list()
+            local foundSlot = nil
+            for slot, item in pairs(list) do
+                if item.name == "minecraft:written_book" and item.nbtHash then
+                    local prefix = string.sub(item.nbtHash, 1, 6)
+                    if prefix == prefixMap[denom] then
+                        foundSlot = slot
+                        break
+                    end
+                end
+            end
+            if not foundSlot then break end
+
+            local moved = payoutChest.pushItems(peripheral.getName(withdrawalChest), foundSlot, 1)
+            if moved == 0 then break end
+
+            amount = amount - denom
+        end
+    end
+    return amount
+end
+
+-- Nearest player detection (no distance limit)
+local function getNearestPlayer()
+    if not radar then return nil end
+
+    local players = radar.getPlayers()
+    if not players or #players == 0 then return nil end
+
+    local nearest = nil
+    local nearestDist = math.huge
+
+    for _, player in ipairs(players) do
+        local dist = math.sqrt(player.x^2 + player.y^2 + player.z^2)
+        if dist < nearestDist then
+            nearest = player
+            nearestDist = dist
+        end
+    end
+
+    return nearest and nearest.name or nil
+end
+
+local function drawCentered(text, y, color)
+    local w, _ = monitor.getSize()
+    local x = math.max(1, math.floor((w - #text) / 2) + 1)
+    monitor.setCursorPos(x, y)
+    if color then monitor.setTextColor(color) end
+    monitor.write(text)
+    monitor.setTextColor(colors.white)
+end
+
+local function drawUI(balance, state, selection)
+    monitor.setBackgroundColor(colors.black)
+    monitor.clear()
+
+    if state == "main" then
+        drawCentered("Welcome to Wavecrest Casino!", 2)
+        drawCentered("[Deposit]", 4, colors.green)
+        drawCentered("[Withdraw]", 6, colors.cyan)
+        drawCentered("Balance: " .. balance .. " coins", 8)
+
+    elseif state == "deposit_confirm" then
+        drawCentered("Deposit books detected!", 5)
+        drawCentered("[Confirm]", 7, colors.green)
+        drawCentered("[Cancel]", 9, colors.red)
+        drawCentered("Balance: " .. balance .. " coins", 11)
+
+    elseif state == "denomination" then
+        drawCentered("Select denomination", 3)
+        local y = 5
+        for _, denom in ipairs(COIN_ORDER) do
+            drawCentered("[ " .. denom .. " ]", y)
+            y = y + 2
+        end
+        drawCentered("Balance: " .. balance .. " coins", y)
+
+    elseif state == "quantity" then
+        drawCentered("Selected: " .. selection.denom .. " coins", 3)
+        drawCentered("Select quantity (1-10)", 5)
+        for i = 1, 10 do
+            monitor.setCursorPos(i * 3, 7)
+            monitor.write("[" .. i .. "]")
+        end
+        drawCentered("Balance: " .. balance .. " coins", 9)
+
+    elseif state == "confirm" then
+        drawCentered("Withdraw " .. selection.amount .. " coins?", 5)
+        drawCentered("[Confirm]", 7, colors.green)
+        drawCentered("[Cancel]", 9, colors.red)
+        drawCentered("Balance: " .. balance .. " coins", 11)
+
+    elseif state == "message" then
+        drawCentered(selection.message or "", 6, selection.color or colors.white)
+    end
+end
+
+local state = "main"
+local selectedPlayer = nil
+local balance = 0
+local selection = { denom = 0, quantity = 0, amount = 0 }
+
+while true do
+    local prevPlayer = selectedPlayer
+    selectedPlayer = getNearestPlayer()
+
+    if not selectedPlayer then
+        if state ~= "main" then
+            monitor.setBackgroundColor(colors.black)
+            monitor.clear()
+            drawCentered("Insert books or approach", 6, colors.yellow)
+            state = "main"
+            selection = { denom = 0, quantity = 0, amount = 0 }
+        end
+        sleep(0.5)
+    else
+        if selectedPlayer ~= prevPlayer then
+            balance = getBalance(selectedPlayer) or 0
+            state = "main"
+            selection = { denom = 0, quantity = 0, amount = 0 }
+        end
+
+        drawUI(balance, state, selection)
+
+        local event, side, x, y = os.pullEventTimeout("monitor_touch", 0.5)
+        if event == "monitor_touch" then
+            if state == "main" then
+                if y == 4 then
+                    local depositTotal = 0
+                    for _, item in pairs(depositChest.list()) do
+                        if item.name == "minecraft:written_book" and item.nbtHash then
+                            local prefix = string.sub(item.nbtHash, 1, 6)
+                            local val = VALID_BOOKS[prefix]
+                            if val then
+                                depositTotal = depositTotal + (val * item.count)
+                            end
+                        end
+                    end
+                    if depositTotal > 0 then
+                        selection.amount = depositTotal
+                        state = "deposit_confirm"
+                    end
+                elseif y == 6 then
+                    state = "denomination"
+                end
+
+            elseif state == "deposit_confirm" then
+                if y == 7 then
+                    for slot in pairs(depositChest.list()) do
+                        depositChest.pushItems(peripheral.getName(payoutChest), slot)
+                    end
+                    balance = balance + selection.amount
+                    setBalance(selectedPlayer, balance)
+                    logger.logTransaction(selectedPlayer, "Deposit", selection.amount, balance)
+                    state = "message"
+                    selection.message = "Deposit complete!"
+                    selection.color = colors.green
+                    drawUI(balance, "message", selection)
+                    sleep(2)
+                    state = "main"
+                    selection = { denom = 0, quantity = 0, amount = 0 }
+                elseif y == 9 then
+                    state = "main"
+                    selection = { denom = 0, quantity = 0, amount = 0 }
+                end
+
+            elseif state == "denomination" then
+                local denomByY = { [5]=15000, [7]=10000, [9]=5000, [11]=1000, [13]=500 }
+                local denom = denomByY[y]
+                if denom then
+                    selection.denom = denom
+                    state = "quantity"
+                end
+
+            elseif state == "quantity" then
+                if y == 7 then
+                    for i = 1, 10 do
+                        if x >= i * 3 and x <= i * 3 + 2 then
+                            selection.quantity = i
+                            selection.amount = selection.denom * i
+                            state = "confirm"
+                            break
+                        end
+                    end
+                end
+
+            elseif state == "confirm" then
+                if y == 7 then
+                    if balance >= selection.amount then
+                        local leftover = giveBooks(selection.amount)
+                        local actual = selection.amount - leftover
+                        balance = balance - actual
+                        setBalance(selectedPlayer, balance)
+                        logger.logTransaction(selectedPlayer, "Withdraw", -actual, balance)
+                        state = "message"
+                        selection.message = "Collect your books"
+                        selection.color = colors.green
+                        drawUI(balance, "message", selection)
+                        sleep(3)
+                        state = "main"
+                        selection = { denom = 0, quantity = 0, amount = 0 }
+                    else
+                        state = "message"
+                        selection.message = "Insufficient funds"
+                        selection.color = colors.red
+                        drawUI(balance, "message", selection)
+                        sleep(2)
+                        state = "main"
+                        selection = { denom = 0, quantity = 0, amount = 0 }
+                    end
+                elseif y == 9 then
+                    state = "main"
+                    selection = { denom = 0, quantity = 0, amount = 0 }
+                end
+            end
+        end
+    end
+end
