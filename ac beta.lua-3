@@ -1,0 +1,306 @@
+-- Account Computer with Firebase + Radar Detection + Monitor UI
+-- Cleaned Version: No rednet, no redstone integrator
+
+-- === Peripheral Setup ===
+local depositChest = peripheral.wrap("minecraft:chest_389")         -- Formerly shulkerBox
+local payoutChest = peripheral.wrap("minecraft:chest_390")          -- Formerly obCN
+local withdrawalChest = peripheral.wrap("minecraft:chest_388")      -- Formerly dropper
+local radar = peripheral.wrap("radar_15")
+local monitor = peripheral.wrap("top")
+
+-- === Firebase API ===
+local API_URL = "https://a8410f940b59.ngrok-free.app/balance/"
+
+local function getBalance(player)
+    local res = http.get(API_URL .. player)
+    if not res then return 0 end
+    local data = textutils.unserializeJSON(res.readAll())
+    res.close()
+    return data and data.coins or 0
+end
+
+local function setBalance(player, amount)
+    local body = textutils.serializeJSON({ coins = amount })
+    http.post(API_URL .. player, body, { ["Content-Type"] = "application/json" })
+end
+
+-- === Book Denominations ===
+local VALID_ITEMS = {
+    ["01cf97"] = 500,
+    ["dd703d"] = 15000,
+    ["e61758"] = 1000,
+    ["1fafe1"] = 5000,
+    ["6d281b"] = 10000,
+}
+
+local PAYOUT_OPTIONS = {500, 1000, 5000, 10000, 15000}
+local selectedValueIndex = 1
+local selectedQty = 1
+local payoutMode = false
+
+-- === Radar + State ===
+local activePlayer = nil
+local balance, distance, message = 0, nil, ""
+
+local smalrad = 1.75
+local largerad = 4
+
+local function radarLoop()
+    while true do
+        local players = radar.getPlayers()
+        local valP, cP = {}, nil
+        for _, p in ipairs(players) do
+            if p.distance <= largerad then
+                table.insert(valP, p)
+                if p.distance <= smalrad then
+                    if not cP or p.distance < cP.distance then
+                        cP = p
+                    end
+                end
+            end
+        end
+
+        if #valP == 1 and cP then
+            activePlayer = cP.name
+            distance = cP.distance
+            balance = getBalance(activePlayer)
+            message = ""
+        elseif #valP == 1 and not cP then
+            activePlayer, distance = nil, nil
+            message = "Not Close Enough!"
+        elseif #valP > 1 then
+            activePlayer, distance = nil, nil
+            message = "Too Many Players!"
+        else
+            activePlayer, distance = nil, nil
+            message = ""
+        end
+        sleep(0.05)
+    end
+end
+
+-- === Display Screen ===
+local function drawBlitBackground()
+    if not fs.exists("account_bg.nfv") then return end
+    local file = fs.open("account_bg.nfv", "r")
+    local w, h = file.readLine():match("(%d+)%s+(%d+)")
+    for y = 1, tonumber(h) do
+        local line = file.readLine()
+        if line then
+            local text, fg, bg = line:match("^(.-)|(.-)|(.+)$")
+            monitor.setCursorPos(1, y)
+            monitor.blit(text, fg, bg)
+        end
+    end
+    file.close()
+end
+
+local function displayLoop()
+    monitor.setTextScale(1)
+    while true do
+        monitor.clear()
+        drawBlitBackground()
+
+        if activePlayer and not payoutMode then
+            monitor.setCursorPos(15, 24)
+            monitor.setBackgroundColor(colors.yellow)
+            monitor.setTextColor(colors.purple)
+            monitor.write("Instructions: With Empty Hand, Open Chest and Put Credits In")
+            monitor.setCursorPos(15, 25)
+            monitor.write("Then, aiming carefully, right click 'deposit' to transfer")
+            monitor.setCursorPos(15, 26)
+            monitor.write("Use 'Pull Out Books' to convert Balance back to books")
+            monitor.setCursorPos(30, 34)
+            monitor.setBackgroundColor(colors.orange)
+            monitor.setTextColor(colors.black)
+            monitor.write("Welcome, " .. activePlayer)
+            monitor.setCursorPos(30, 35)
+            monitor.write("Balance: $" .. balance)
+            monitor.setBackgroundColor(colors.green)
+            monitor.setCursorPos(30, 37)
+            monitor.write("[ Deposit Books ]")
+
+            if message then
+                monitor.setCursorPos(30, 38)
+                monitor.write(message)
+            end
+
+            monitor.setCursorPos(30, 30)
+            monitor.setBackgroundColor(colors.lime)
+            monitor.setTextColor(colors.black)
+            monitor.write("[ Pull Out Books ]")
+
+        elseif activePlayer and payoutMode then
+            drawBlitBackground()
+
+            monitor.setCursorPos(30, 30)
+            monitor.setBackgroundColor(colors.black)
+            monitor.setTextColor(colors.white)
+            monitor.write("Select Book Value and Quantity with + and -")
+
+            monitor.setCursorPos(30, 28)
+            monitor.write("Balance $" .. balance)
+
+            monitor.setCursorPos(20, 32)
+            monitor.setBackgroundColor(colors.gray)
+            monitor.setTextColor(colors.white)
+            monitor.write("[-]")
+
+            monitor.setCursorPos(25, 32)
+            monitor.setBackgroundColor(colors.black)
+            monitor.write("Book: $" .. PAYOUT_OPTIONS[selectedValueIndex])
+
+            monitor.setCursorPos(42, 32)
+            monitor.setBackgroundColor(colors.gray)
+            monitor.write("[+]")
+
+            monitor.setCursorPos(48, 32)
+            monitor.setBackgroundColor(colors.gray)
+            monitor.write("[-]")
+
+            monitor.setCursorPos(53, 32)
+            monitor.setBackgroundColor(colors.black)
+            monitor.write("Qty: " .. selectedQty)
+
+            monitor.setCursorPos(62, 32)
+            monitor.setBackgroundColor(colors.gray)
+            monitor.write("[+]")
+
+            monitor.setCursorPos(35, 35)
+            monitor.setBackgroundColor(colors.lime)
+            monitor.setTextColor(colors.black)
+            monitor.write("[ Payout ]")
+
+            monitor.setCursorPos(35, 37)
+            monitor.setBackgroundColor(colors.red)
+            monitor.setTextColor(colors.white)
+            monitor.write("[ Back ]")
+
+            if message then
+                monitor.setCursorPos(25, 39)
+                monitor.setBackgroundColor(colors.black)
+                monitor.setTextColor(colors.yellow)
+                monitor.write(message)
+            end
+        else
+            monitor.setCursorPos(30, 35)
+            monitor.write("Stand on the block...")
+            monitor.setCursorPos(30, 36)
+            monitor.write("Only 1 Player Inside Marked Area!")
+        end
+        sleep(.1)
+    end
+end
+
+-- === Deposit Logic ===
+local function processDeposit(player)
+    local total = 0
+    for slot, item in pairs(depositChest.list()) do
+        if item.nbtHash then
+            local prefix = string.sub(item.nbtHash, 1, 6)
+            local value = VALID_ITEMS[prefix]
+            if value then
+                local moved = depositChest.pushItems(peripheral.getName(payoutChest), slot, item.count)
+                total = total + (moved * value)
+            end
+        end
+    end
+    if total > 0 then
+        local newBal = getBalance(player) + total
+        setBalance(player, newBal)
+        message = "Deposited " .. total .. " coins"
+        return newBal, message
+    end
+    return getBalance(player), "No valid tokens."
+end
+
+-- === Payout Logic ===
+local function processPayout(player)
+    local value = PAYOUT_OPTIONS[selectedValueIndex]
+    local qtyToMove = selectedQty
+    local total = value * qtyToMove
+    local bal = getBalance(player)
+
+    if bal < total then
+        message = "Insufficient balance."
+        return bal
+    end
+
+    local prefix = nil
+    for k, v in pairs(VALID_ITEMS) do
+        if v == value then
+            prefix = k
+            break
+        end
+    end
+    if not prefix then
+        message = "Token type error."
+        return bal
+    end
+
+    local chest = payoutChest
+    local movedTotal = 0
+
+    for slot, item in pairs(chest.list()) do
+        if item.nbtHash and string.sub(item.nbtHash, 1, 6) == prefix then
+            while movedTotal < qtyToMove and item.count > 0 do
+                local moved = chest.pushItems(peripheral.getName(withdrawalChest), slot, 1)
+                if moved > 0 then
+                    movedTotal = movedTotal + 1
+                    sleep(0.05)
+                else
+                    break
+                end
+            end
+        end
+        if movedTotal >= qtyToMove then break end
+    end
+
+    if movedTotal < qtyToMove then
+        message = "Only moved " .. movedTotal .. "/" .. qtyToMove
+        return bal
+    end
+
+    setBalance(player, bal - total)
+    message = "Dispensed " .. movedTotal .. " x $" .. value
+    return getBalance(player)
+end
+
+-- === Touch Events ===
+local function touchLoop()
+    while true do
+        local _, _, x, y = os.pullEvent("monitor_touch")
+        if activePlayer then
+            if payoutMode then
+                if y == 32 and x >= 20 and x <= 22 then
+                    selectedValueIndex = math.max(1, selectedValueIndex - 1)
+                elseif y == 32 and x >= 42 and x <= 44 then
+                    selectedValueIndex = math.min(#PAYOUT_OPTIONS, selectedValueIndex + 1)
+                elseif y == 32 and x >= 48 and x <= 50 then
+                    selectedQty = math.max(1, selectedQty - 1)
+                elseif y == 32 and x >= 62 and x <= 64 then
+                    selectedQty = math.min(16, selectedQty + 1)
+                elseif y == 35 and x >= 35 and x <= 50 then
+                    balance = processPayout(activePlayer)
+                elseif y == 37 and x >= 35 and x <= 50 then
+                    payoutMode = false
+                    message = ""
+                end
+            else
+                if y == 30 and x >= 30 and x <= 40 then
+                    payoutMode = true
+                elseif y >= 36 and y <= 38 then
+                    balance, message = processDeposit(activePlayer)
+                end
+            end
+        end
+        sleep(0.1)
+    end
+end
+
+-- === Run All Threads ===
+parallel.waitForAny(
+    radarLoop,
+    displayLoop,
+    touchLoop
+)
