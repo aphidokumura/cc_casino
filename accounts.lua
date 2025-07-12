@@ -68,29 +68,12 @@ local function giveBooks(amount)
     return amount -- Remaining
 end
 
--- Updated radar player detection: nearest player within 8 blocks
-local function getNearestPlayerWithin8()
+-- Get player from radar
+local function getPlayer()
     if not radar then return nil end
-
     local players = radar.getPlayers()
-    if not players or #players == 0 then return nil end
-
-    local nearest = nil
-    local nearestDist = 8
-
-    for _, player in ipairs(players) do
-        local dist = math.sqrt(player.x^2 + player.y^2 + player.z^2)
-        if dist <= 8 and (not nearest or dist < nearestDist) then
-            nearest = player
-            nearestDist = dist
-        end
-    end
-
-    if nearest then
-        return nearest.name
-    else
-        return nil
-    end
+    if #players == 0 then return nil end
+    return players[1].name
 end
 
 -- Monitor UI utils
@@ -107,28 +90,12 @@ local function drawUI(balance, step, selection)
     monitor.setTextColor(colors.white)
     monitor.clear()
 
-    local w, _ = monitor.getSize()
+    drawCentered("Balance: " .. balance .. " coins", 1)
 
     if step == "main" then
-        -- Centered "Welcome to Wavecrest Casino!"
-        local welcome = "Welcome to Wavecrest Casino!"
-        local xWelcome = math.floor((w - #welcome) / 2) + 1
-        monitor.setCursorPos(xWelcome, 2)
-        monitor.write(welcome)
-
-        -- Centered "[Deposit]"
-        local deposit = "[Deposit]"
-        local xDeposit = math.floor((w - #deposit) / 2) + 1
-        monitor.setCursorPos(xDeposit, 4)
-        monitor.setTextColor(colors.green)
-        monitor.write(deposit)
-
-        -- Centered "[Withdraw]"
-        local withdraw = "[Withdraw]"
-        local xWithdraw = math.floor((w - #withdraw) / 2) + 1
-        monitor.setCursorPos(xWithdraw, 6)
-        monitor.setTextColor(colors.cyan)
-        monitor.write(withdraw)
+        drawCentered("Select Action", 3)
+        drawCentered("[ Deposit ]", 5, colors.green)
+        drawCentered("[ Withdraw ]", 7, colors.cyan)
 
     elseif step == "denomination" then
         drawCentered("Select denomination", 3)
@@ -165,14 +132,14 @@ local balance = 0
 local selection = { denom = 0, quantity = 0, amount = 0 }
 
 while true do
-    selectedPlayer = getNearestPlayerWithin8()
+    selectedPlayer = getPlayer()
     if selectedPlayer then
         balance = getBalance(selectedPlayer) or 0
 
         if state == "main" then
             drawUI(balance, "main")
             local _, _, x, y = os.pullEvent("monitor_touch")
-            if y == 4 then
+            if y == 5 then
                 local depositTotal = 0
                 local list = depositChest.list()
                 for _, item in pairs(list) do
@@ -189,7 +156,7 @@ while true do
                     state = "deposit_confirm"
                 end
 
-            elseif y == 6 then
+            elseif y == 7 then
                 state = "denomination"
             end
 
@@ -277,5 +244,4 @@ while true do
         monitor.write("Insert books or approach")
         sleep(1)
     end
-    sleep(0.5) -- small delay for radar refresh and CPU efficiency
 end
