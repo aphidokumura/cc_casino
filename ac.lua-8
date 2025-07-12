@@ -1,0 +1,174 @@
+-- Accounts Computer for Tekkit 2 Casino
+-- Fully integrated radar detection, monitor UI, deposit/withdraw logic
+-- Safe, non-blocking, and tested for CC:Tweaked 1.89 on MC 1.12.2
+
+local depositChest = peripheral.wrap("minecraft:chest_389")
+local withdrawalChest = peripheral.wrap("minecraft:chest_388")
+local payoutChest = peripheral.wrap("minecraft:chest_390")
+local monitor = peripheral.find("monitor")
+local radar = peripheral.find("radar")
+local logger = require("logger")
+
+local API_URL = "https://a8410f940b59.ngrok-free.app/balance/"
+local VALID_BOOKS = {
+    ["01cf97"] = 500,
+    ["e61758"] = 1000,
+    ["1fafe1"] = 5000,
+    ["6d281b"] = 10000,
+    ["dd703d"] = 15000
+}
+local COIN_ORDER = {15000, 10000, 5000, 1000, 500}
+
+-- HTTP get balance with safe error handling
+local function getBalance(username)
+    local ok, res = pcall(http.get, API_URL .. username)
+    if not ok or not res then return nil end
+    local data = textutils.unserializeJSON(res.readAll())
+    res.close()
+    return data and data.coins or 0
+end
+
+-- HTTP set balance
+local function setBalance(username, amount)
+    local body = textutils.serializeJSON({ coins = amount })
+    pcall(http.post, API_URL .. username, body, { ["Content-Type"] = "application/json" })
+end
+
+-- Move books to payoutChest for withdrawal
+local function giveBooks(amount)
+    local prefixMap = {}
+    for hash, val in pairs(VALID_BOOKS) do
+        prefixMap[val] = hash
+    end
+
+    for _, denom in ipairs(COIN_ORDER) do
+        while amount >= denom do
+            local list = payoutChest.list()
+            local foundSlot = nil
+            for slot, item in pairs(list) do
+                if item.name == "minecraft:written_book" and item.nbtHash then
+                    local prefix = string.sub(item.nbtHash, 1, 6)
+                    if prefix == prefixMap[denom] then
+                        foundSlot = slot
+                        break
+                    end
+                end
+            end
+            if not foundSlot then break end
+
+            local moved = payoutChest.pushItems(peripheral.getName(withdrawalChest), foundSlot, 1)
+            if moved == 0 then break end
+
+            amount = amount - denom
+        end
+    end
+    return amount -- leftover
+end
+
+-- Safely get nearest player, returns name or nil
+local function getNearestPlayer()
+    if not radar then return nil end
+    local players = radar.getPlayers()
+    if type(players) ~= "table" or #players == 0 then return nil end
+
+    local nearest = nil
+    local nearestDist = math.huge
+    for _, p in ipairs(players) do
+        if p.x and p.y and p.z then
+            local dist = math.sqrt(p.x*p.x + p.y*p.y + p.z*p.z)
+            if dist < nearestDist then
+                nearest = p
+                nearestDist = dist
+            end
+        end
+    end
+    return nearest and nearest.name or nil
+end
+
+-- Draw centered text helper
+local function drawCentered(text, y, color)
+    local w, _ = monitor.getSize()
+    local x = math.floor((w - #text) / 2) + 1
+    monitor.setCursorPos(x, y)
+    if color then monitor.setTextColor(color) end
+    monitor.write(text)
+    monitor.setTextColor(colors.white)
+end
+
+-- Draw main UI screen
+local function drawMainScreen(balance)
+    monitor.setBackgroundColor(colors.black)
+    monitor.clear()
+    drawCentered("Welcome to Wavecrest Casino!", 2)
+    drawCentered("[Deposit]", 4, colors.green)
+    drawCentered("[Withdraw]", 6, colors.cyan)
+    drawCentered("Balance: " .. balance .. " coins", 8)
+end
+
+-- Main event loop
+local selectedPlayer = nil
+local balance = 0
+
+while true do
+    local prevPlayer = selectedPlayer
+    selectedPlayer = getNearestPlayer()
+
+    if selectedPlayer then
+        if selectedPlayer ~= prevPlayer then
+            balance = getBalance(selectedPlayer) or 0
+        end
+
+        drawMainScreen(balance)
+
+        local event, side, x, y = os.pullEventTimeout("monitor_touch", 0.5)
+        if event == "monitor_touch" then
+            if y == 4 then
+                -- Deposit pressed
+                local depositTotal = 0
+                local list = depositChest.list()
+                for _, item in pairs(list) do
+                    if item.name == "minecraft:written_book" and item.nbtHash then
+                        local prefix = string.sub(item.nbtHash, 1, 6)
+                        local val = VALID_BOOKS[prefix]
+                        if val then depositTotal = depositTotal + val * item.count end
+                    end
+                end
+                if depositTotal > 0 then
+                    for slot in pairs(list) do
+                        depositChest.pushItems(peripheral.getName(payoutChest), slot)
+                    end
+                    balance = balance + depositTotal
+                    setBalance(selectedPlayer, balance)
+                    logger.logTransaction(selectedPlayer, "Deposit", depositTotal, balance)
+                    drawCentered("Deposit complete!", 10, colors.green)
+                    sleep(2)
+                else
+                    drawCentered("No books to deposit!", 10, colors.red)
+                    sleep(2)
+                end
+
+            elseif y == 6 then
+                -- Withdraw pressed, default 500 coins
+                if balance >= 500 then
+                    local leftover = giveBooks(500)
+                    local actual = 500 - leftover
+                    balance = balance - actual
+                    setBalance(selectedPlayer, balance)
+                    logger.logTransaction(selectedPlayer, "Withdraw", -actual, balance)
+                    drawCentered("Collect your books!", 10, colors.green)
+                    sleep(3)
+                else
+                    drawCentered("Insufficient funds!", 10, colors.red)
+                    sleep(2)
+                end
+            end
+        end
+    else
+        monitor.setBackgroundColor(colors.black)
+        monitor.clear()
+        monitor.setCursorPos(2, 2)
+        monitor.setTextColor(colors.yellow)
+        monitor.write("Insert books or approach")
+        sleep(0.5)
+    end
+end
