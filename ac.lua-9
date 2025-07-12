@@ -1,0 +1,182 @@
+-- Account Computer with Firebase + Radar Detection + Monitor UI
+-- Author: GPT (rewritten from user & friend's previous working version)
+
+-- === Peripherals ===
+local depositChest = peripheral.wrap("minecraft:chest_389")
+local withdrawalChest = peripheral.wrap("minecraft:chest_388")
+local payoutChest = peripheral.wrap("minecraft:chest_390")
+local monitor = peripheral.find("monitor")
+local radar = peripheral.find("radar")
+local logger = require("logger")
+
+-- === Firebase API ===
+local API_URL = "https://a8410f940b59.ngrok-free.app/balance/"
+
+local function getBalance(player)
+    local res = http.get(API_URL .. player)
+    if not res then return 0 end
+    local data = textutils.unserializeJSON(res.readAll())
+    res.close()
+    return data and data.coins or 0
+end
+
+local function setBalance(player, amount)
+    local body = textutils.serializeJSON({ coins = amount })
+    http.post(API_URL .. player, body, { ["Content-Type"] = "application/json" })
+end
+
+-- === Book Denominations ===
+local VALID_BOOKS = {
+    ["01cf97"] = 500,
+    ["e61758"] = 1000,
+    ["1fafe1"] = 5000,
+    ["6d281b"] = 10000,
+    ["dd703d"] = 15000
+}
+local COIN_ORDER = {15000, 10000, 5000, 1000, 500}
+
+-- === UI Utils ===
+local function drawCentered(text, y, color)
+    local w = monitor.getSize()
+    local x = math.floor(w / 2 - #text / 2)
+    monitor.setCursorPos(x, y)
+    if color then monitor.setTextColor(color) end
+    monitor.write(text)
+end
+
+local function drawMainScreen(balance)
+    monitor.setBackgroundColor(colors.black)
+    monitor.clear()
+    monitor.setTextColor(colors.white)
+    drawCentered("Welcome to Wavecrest Casino!", 2, colors.yellow)
+    drawCentered("Balance: " .. balance .. " coins", 3, colors.white)
+    drawCentered("[Deposit]", 5, colors.green)
+    drawCentered("[Withdraw]", 7, colors.cyan)
+end
+
+local function drawDepositConfirm()
+    monitor.setBackgroundColor(colors.black)
+    monitor.clear()
+    drawCentered("Deposit books detected!", 5)
+    drawCentered("[ Confirm ]", 7, colors.green)
+    drawCentered("[ Cancel ]", 9, colors.red)
+end
+
+local function drawWithdrawConfirm(amount)
+    monitor.setBackgroundColor(colors.black)
+    monitor.clear()
+    drawCentered("Withdraw " .. amount .. " coins?", 5)
+    drawCentered("[ Confirm ]", 7, colors.green)
+    drawCentered("[ Cancel ]", 9, colors.red)
+end
+
+-- === Book Logic ===
+local function giveBooks(amount)
+    local prefixMap = {}
+    for hash, val in pairs(VALID_BOOKS) do
+        prefixMap[val] = hash
+    end
+
+    for _, denom in ipairs(COIN_ORDER) do
+        while amount >= denom do
+            local list = payoutChest.list()
+            for slot, item in pairs(list) do
+                if item.name == "minecraft:written_book" and item.nbtHash and string.sub(item.nbtHash, 1, 6) == prefixMap[denom] then
+                    payoutChest.pushItems(peripheral.getName(withdrawalChest), slot, 1)
+                    amount = amount - denom
+                    break
+                end
+            end
+            break -- if no more found of this denom
+        end
+    end
+    return amount -- leftover
+end
+
+local function getNearbyPlayer()
+    local players = radar.getPlayers()
+    if #players > 0 then return players[1].name end
+    return nil
+end
+
+-- === State ===
+local state = "main"
+local selectedPlayer = nil
+local balance = 0
+local selection = 0
+
+-- === Main Loop ===
+while true do
+    local newPlayer = getNearbyPlayer()
+    if newPlayer ~= selectedPlayer then
+        selectedPlayer = newPlayer
+        if selectedPlayer then
+            balance = getBalance(selectedPlayer)
+            state = "main"
+        else
+            monitor.clear()
+            drawCentered("Insert books or approach", 5, colors.yellow)
+            sleep(0.5)
+        end
+    end
+
+    if selectedPlayer then
+        if state == "main" then
+            drawMainScreen(balance)
+            local event, side, x, y = os.pullEvent("monitor_touch")
+            if y == 5 then
+                -- Deposit
+                local total = 0
+                for _, item in pairs(depositChest.list()) do
+                    if item.name == "minecraft:written_book" and item.nbtHash then
+                        local prefix = string.sub(item.nbtHash, 1, 6)
+                        local value = VALID_BOOKS[prefix]
+                        if value then total = total + (item.count * value) end
+                    end
+                end
+                if total > 0 then
+                    selection = total
+                    state = "deposit_confirm"
+                end
+            elseif y == 7 then
+                -- Withdraw preset
+                selection = 5000 -- default withdraw
+                state = "withdraw_confirm"
+            end
+
+        elseif state == "deposit_confirm" then
+            drawDepositConfirm()
+            local event, side, x, y = os.pullEvent("monitor_touch")
+            if y == 7 then
+                for slot, item in pairs(depositChest.list()) do
+                    if item.name == "minecraft:written_book" then
+                        depositChest.pushItems(peripheral.getName(payoutChest), slot)
+                    end
+                end
+                balance = balance + selection
+                setBalance(selectedPlayer, balance)
+                logger.logTransaction(selectedPlayer, "Deposit", selection, balance)
+                state = "main"
+            elseif y == 9 then
+                state = "main"
+            end
+
+        elseif state == "withdraw_confirm" then
+            drawWithdrawConfirm(selection)
+            local event, side, x, y = os.pullEvent("monitor_touch")
+            if y == 7 then
+                if balance >= selection then
+                    local leftover = giveBooks(selection)
+                    local actual = selection - leftover
+                    balance = balance - actual
+                    setBalance(selectedPlayer, balance)
+                    logger.logTransaction(selectedPlayer, "Withdraw", -actual, balance)
+                end
+                state = "main"
+            elseif y == 9 then
+                state = "main"
+            end
+        end
+    end
+    sleep(0.25)
+end
