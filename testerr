@@ -1,0 +1,26 @@
+-- Debug script to print touch events and monitor sizes
+
+local monitors = {
+  main = peripheral.wrap("monitor_777"),
+  betting = peripheral.wrap("monitor_779"),
+  action = peripheral.wrap("monitor_778"),
+}
+
+print("Monitor names and sizes:")
+for name, mon in pairs(monitors) do
+  local w, h = mon.getSize()
+  print(string.format("%s: width=%d, height=%d", name, w, h))
+end
+
+print("Listening for monitor touches...")
+
+while true do
+  local event, side, x, y = os.pullEvent("monitor_touch")
+  print(string.format("Touch detected on side '%s' at x=%d, y=%d", side, x, y))
+
+  for name, mon in pairs(monitors) do
+    if side == peripheral.getName(mon) then
+      print(string.format(" -> Touch on %s monitor", name))
+    end
+  end
+end
