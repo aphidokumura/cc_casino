@@ -1,0 +1,293 @@
+-- Double Up (Final Rednet-Based, No Firebase, Proper Winnings Update)
+
+-- Peripheral Setup
+local main = peripheral.wrap("monitor_739")
+local bid  = peripheral.wrap("monitor_741")
+local act  = peripheral.wrap("monitor_740")
+local radar = peripheral.wrap("radar_35")
+local speaker = peripheral.find("speaker") or peripheral.find("jukebox")
+
+-- Rednet Modem & Account Computer ID
+local modem = peripheral.find("modem")
+if not modem then error("No modem found") end
+rednet.open(peripheral.getName(modem))
+local ACCOUNT_ID = 8166
+
+-- Constants
+local RISK_CHANCE = 45
+local betOptions = {100, 200, 300, 400, 500}
+local MAX_INITIAL_DISTANCE = 8
+local MAX_DISTANCE = 6
+
+-- Helpers
+local function center(mon, y, txt, textColor, bgColor)
+  local w, h = mon.getSize()
+  if y > h then return end
+  mon.setCursorPos(math.max(1, math.floor(w / 2 - #txt / 2)), y)
+  mon.setTextColor(textColor or colors.white)
+  mon.setBackgroundColor(bgColor or colors.black)
+  mon.write(txt:sub(1, w))
+end
+
+-- Returns start and end X coordinates of centered text on a monitor line y
+local function getTextBounds(mon, y, txt)
+  local w, _ = mon.getSize()
+  local startX = math.max(1, math.floor(w / 2 - #txt / 2))
+  local endX = startX + #txt - 1
+  return startX, endX
+end
+
+local function getBal(name)
+  rednet.send(ACCOUNT_ID, {action = "get_balance", player = name}, "casino")
+  local id, msg = rednet.receive("casino", 2)
+  if type(msg) == "table" and msg.player == name then
+    return tonumber(msg.balance or 0)
+  end
+  return 0
+end
+
+local function update(player, delta, note)
+  rednet.send(ACCOUNT_ID, {
+    action = "transfer",
+    player = player,
+    delta = delta,
+    note = note or "DOUBLE UP!"
+  }, "casino")
+end
+
+local function getClosestPlayer()
+  if not radar then return nil end
+  local players = radar.getPlayers()
+  if not players or #players == 0 then return nil end
+  local closest = nil
+  for _, p in ipairs(players) do
+    if p.distance <= MAX_INITIAL_DISTANCE then
+      if not closest or p.distance < closest.distance then
+        closest = p
+      end
+    end
+  end
+  return closest and closest.name or nil, closest and closest.distance or nil
+end
+
+local function showBettingUI(player, balance, bet)
+  bid.setBackgroundColor(colors.lime)
+  bid.setTextColor(colors.purple)
+  bid.clear()
+  center(bid, 1, "Balance: " .. balance, colors.purple, colors.lime)
+  center(bid, 2, "Bet: " .. bet, colors.purple, colors.lime)
+  center(bid, 3, "[<]Lower Raise[>]", colors.magenta, colors.lime)
+end
+
+local function showActionUI()
+  act.setBackgroundColor(colors.orange)
+  act.setTextColor(colors.cyan)
+  act.clear()
+  center(act, 2, "[Enter]", colors.cyan, colors.orange)
+  center(act, 4, "[Cancel]", colors.cyan, colors.orange)
+end
+
+local function getBet(player, balance)
+  local index = 1
+  local bet = betOptions[index]
+  local timeout = 30
+  local startTime = os.clock()
+
+  while true do
+    showBettingUI(player, balance, bet)
+    showActionUI()
+
+    if os.clock() - startTime >= timeout then
+      main.clear()
+      center(main, 2, "Timed out. Returning to menu.", colors.yellow, colors.blue)
+      if speaker then speaker.playSound("minecraft:block.note_block.bass", 1.0, 0.5) end
+      sleep(2)
+      return nil
+    end
+
+    local players = radar and radar.getPlayers() or {}
+    local stillNearby = false
+    for _, p in ipairs(players) do
+      if p.name == player and p.distance <= MAX_INITIAL_DISTANCE then
+        stillNearby = true
+        break
+      end
+    end
+    if not stillNearby then
+      main.clear()
+      center(main, 2, "Player walked away.", colors.yellow, colors.blue)
+      if speaker then speaker.playSound("minecraft:block.note_block.bass", 1.0, 0.4) end
+      sleep(2)
+      return nil
+    end
+
+    os.startTimer(0.25)
+    local event, side, x, y = os.pullEvent()
+    if event == "monitor_touch" then
+      if side == peripheral.getName(bid) and y == 3 then
+        if x <= 6 then 
+          index = math.max(1, index - 1)
+        elseif x >= 12 then 
+          index = math.min(#betOptions, index + 1)
+        end
+        bet = betOptions[index]
+        startTime = os.clock()
+      end
+
+      if side == peripheral.getName(act) then
+        local confirmText = "[Enter]"
+        local cancelText = "[Cancel]"
+        local cStart, cEnd = getTextBounds(act, 2, confirmText)
+        local xStart, xEnd = getTextBounds(act, 4, cancelText)
+
+        if y == 2 and x >= cStart and x <= cEnd then
+          if bet > balance then
+            main.clear()
+            center(main, 2, "Insufficient funds", colors.yellow, colors.blue)
+            sleep(2)
+          else 
+            return bet 
+          end
+        elseif y == 4 and x >= xStart and x <= xEnd then
+          main.clear()
+          center(main, 2, "Bet Cancelled", colors.yellow, colors.blue)
+          sleep(2)
+          return nil
+        end
+      end
+    end
+  end
+end
+
+local function doubleOrCash(player, winnings)
+  act.setBackgroundColor(colors.orange)
+  act.setTextColor(colors.cyan)
+  act.clear()
+  center(act, 2, "Winnings: " .. winnings, colors.cyan, colors.orange)
+  center(act, 3, "< Double | Cash >", colors.cyan, colors.orange)
+
+  while true do
+    local _, side, x, y = os.pullEvent("monitor_touch")
+    if side == peripheral.getName(act) and y == 3 then
+      if x < 9 then return "double" else return "cash" end
+    end
+  end
+end
+
+local function flip()
+  return math.random(100) <= RISK_CHANCE
+end
+
+local function playNote(index, success)
+  if not speaker then return end
+  local name = success and "note.pling" or "note.bass"
+  local pitch = success and (0.5 + index * 0.15) or 0.4
+  speaker.playSound("minecraft:block." .. name, 1.0, pitch)
+end
+
+local function drawProgress(stage, loss, pulseOn)
+  main.clear()
+  main.setBackgroundColor(colors.blue)
+  center(main, 4, "DOUBLE UP!", colors.yellow, colors.blue)
+  for i = 0, 5 do
+    local x = 12 + i * 5
+    main.setCursorPos(x, 10)
+    if i < stage then
+      main.setBackgroundColor(colors.green)
+    elseif i == stage then
+      main.setBackgroundColor(loss and colors.red or (pulseOn and colors.white or colors.gray))
+    else
+      main.setBackgroundColor(colors.gray)
+    end
+    main.write("   ")
+  end
+  main.setBackgroundColor(colors.blue)
+end
+
+-- Main Loop
+while true do
+  local lockedPlayer = nil
+  local lockedDistance = nil
+
+  while not lockedPlayer do
+    local name, dist = getClosestPlayer()
+    if not name then
+      main.setBackgroundColor(colors.blue)
+      main.setTextColor(colors.yellow)
+      main.clear()
+      center(main, 2, "WELCOME TO DOUBLE UP!", colors.yellow, colors.blue)
+      center(main, 4, "Please approach within 8 blocks...", colors.yellow, colors.blue)
+      sleep(1)
+    else
+      lockedPlayer = name
+      lockedDistance = dist
+      main.clear()
+      main.setBackgroundColor(colors.blue)
+      center(main, 2, "DOUBLE UP: PLACE BET", colors.yellow, colors.blue)
+      center(main, 4, "Player: " .. lockedPlayer .. " detected!", colors.yellow, colors.blue)
+      sleep(1)
+    end
+  end
+
+  local bal = getBal(lockedPlayer)
+  local bet = getBet(lockedPlayer, bal)
+
+  if not bet then
+    lockedPlayer = nil
+  else
+    update(lockedPlayer, -bet, "double-up bet")
+    local winnings = bet
+    local stage = 0
+
+    while stage < 6 do
+      local _, distNow = getClosestPlayer()
+      if not distNow or distNow > MAX_DISTANCE then
+        center(main, 15, "Player left. Continuing...", colors.yellow, colors.blue)
+        sleep(2)
+      end
+
+      stage = stage + 1
+      drawProgress(stage - 1, false, false)
+      sleep(0.5)
+
+      for j = 1, 8 do
+        drawProgress(stage, false, j % 2 == 1)
+        playNote(stage, true)
+        sleep(0.5)
+      end
+
+      if flip() then
+        winnings = winnings * 2
+        drawProgress(stage, false, false)
+        center(main, 13, "WIN! Winnings: " .. winnings, colors.green, colors.blue)
+        if speaker then speaker.playSound("minecraft:block.note_block.chime") end
+        sleep(1)
+
+        if stage == 6 then
+          update(lockedPlayer, winnings, "double-up jackpot")
+          center(main, 15, "JACKPOT! " .. winnings .. " coins!", colors.lime, colors.blue)
+          sleep(3)
+          break
+        end
+
+        local choice = doubleOrCash(lockedPlayer, winnings)
+        if choice == "cash" then
+          update(lockedPlayer, winnings, "double-up cash out")
+          main.clear()
+          center(main, 2, "You won " .. winnings .. " coins!", colors.green, colors.blue)
+          sleep(3)
+          break
+        end
+      else
+        drawProgress(stage, true, false)
+        center(main, 13, "You Lose!", colors.red, colors.blue)
+        playNote(stage, false)
+        if speaker then speaker.playSound("minecraft:block.note_block.bass") end
+        sleep(3)
+        break
+      end
+    end
+  end
+
+  lockedPlayer = nil
+end
