@@ -195,6 +195,102 @@ local function radarLoop()
     end
 end
 
+-- === Display Loop (Added) ===
+local function displayLoop()
+    monitor.setTextScale(1)
+    while true do
+        monitor.clear()
+
+        if activePlayer and not payoutMode then
+            monitor.setCursorPos(15, 24)
+            monitor.setBackgroundColor(colors.yellow)
+            monitor.setTextColor(colors.purple)
+            monitor.write("Instructions: With Empty Hand, Open Shulker Box and Put Credits In")
+            monitor.setCursorPos(15, 25)
+            monitor.write("Then, aiming carefully, right click 'deposit' to transfer")
+            monitor.setCursorPos(15, 26)
+            monitor.write("Use 'Pull Out Books' to convert Balance back to books")
+            monitor.setCursorPos(30, 34)
+            monitor.setBackgroundColor(colors.orange)
+            monitor.setTextColor(colors.black)
+            monitor.write("Welcome, " .. activePlayer)
+            monitor.setCursorPos(30, 35)
+            monitor.write("Balance: $" .. balance)
+            monitor.setBackgroundColor(colors.green)
+            monitor.setCursorPos(30, 37)
+            monitor.write("[ Deposit Books ]")
+
+            if message then
+                monitor.setCursorPos(30, 38)
+                monitor.write(message)
+            end
+
+            monitor.setCursorPos(30, 30)
+            monitor.setBackgroundColor(colors.lime)
+            monitor.setTextColor(colors.black)
+            monitor.write("[ Pull Out Books ]")
+
+        elseif activePlayer and payoutMode then
+            monitor.setCursorPos(30, 30)
+            monitor.setBackgroundColor(colors.black)
+            monitor.setTextColor(colors.white)
+            monitor.write("Select Book Value and Quantity with + and -")
+
+            monitor.setCursorPos(30, 28)
+            monitor.write("Balance $" .. balance)
+
+            monitor.setCursorPos(20, 32)
+            monitor.setBackgroundColor(colors.gray)
+            monitor.setTextColor(colors.white)
+            monitor.write("[-]")
+
+            monitor.setCursorPos(25, 32)
+            monitor.setBackgroundColor(colors.black)
+            monitor.write("Book: $" .. PAYOUT_OPTIONS[selectedValueIndex])
+
+            monitor.setCursorPos(42, 32)
+            monitor.setBackgroundColor(colors.gray)
+            monitor.write("[+]")
+
+            monitor.setCursorPos(48, 32)
+            monitor.setBackgroundColor(colors.gray)
+            monitor.write("[-]")
+
+            monitor.setCursorPos(53, 32)
+            monitor.setBackgroundColor(colors.black)
+            monitor.write("Qty: " .. selectedQty)
+
+            monitor.setCursorPos(62, 32)
+            monitor.setBackgroundColor(colors.gray)
+            monitor.write("[+]")
+
+            monitor.setCursorPos(35, 35)
+            monitor.setBackgroundColor(colors.lime)
+            monitor.setTextColor(colors.black)
+            monitor.write("[ Payout ]")
+
+            monitor.setCursorPos(35, 37)
+            monitor.setBackgroundColor(colors.red)
+            monitor.setTextColor(colors.white)
+            monitor.write("[ Back ]")
+
+            if message then
+                monitor.setCursorPos(25, 39)
+                monitor.setBackgroundColor(colors.black)
+                monitor.setTextColor(colors.yellow)
+                monitor.write(message)
+            end
+        else
+            monitor.setCursorPos(30, 35)
+            monitor.write("Stand on the block...")
+            monitor.setCursorPos(30, 36)
+            monitor.write("Only 1 Player Inside Marked Area!")
+        end
+
+        sleep(0.1)
+    end
+end
+
 -- === Rednet Listener ===
 local function rednetListener()
     while true do
@@ -238,6 +334,5 @@ end
 parallel.waitForAny(
     radarLoop,
     displayLoop,
-    touchLoop,
     rednetListener
 )
