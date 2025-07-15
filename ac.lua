@@ -1,230 +1,243 @@
--- Full rewrite of Wavecrest Casino Account Computer
+-- Account Computer with Radar + Deposit + Rednet Transfer + Background Support
 
-local depositChest = peripheral.wrap("minecraft:chest_389")
-local withdrawalChest = peripheral.wrap("minecraft:chest_388")
-local payoutChest = peripheral.wrap("minecraft:chest_390")
-local monitor = peripheral.find("monitor")
-local radar = peripheral.find("radar")
-local logger = require("logger")
+-- === Peripheral Setup ===
+local shulkerBox = peripheral.wrap("minecraft:ironshulkerbox_gold_1")
+local obCN = "minecraft:ironchest_obsidian_105"
+local dropper = "minecraft:dropper_3"
+local radar = peripheral.wrap("radar_15")
+local monitor = peripheral.wrap("top")
+local modem = peripheral.wrap("bottom")
+local ri = "redstone_integrator_4025"
+local rip = peripheral.wrap(ri)
 
-local API_URL = "https://a8410f940b59.ngrok-free.app/balance/"
+if not modem then error("? No modem on bottom") end
+rednet.open("bottom")
 
-local VALID_BOOKS = {
-  ["01cf97"] = 500,
-  ["e61758"] = 1000,
-  ["1fafe1"] = 5000,
-  ["6d281b"] = 10000,
-  ["dd703d"] = 15000
+if not fs.exists("/accounts") then fs.makeDir("/accounts") end
+
+local VALID_ITEMS = {
+    ["01cf97"] = 500,
+    ["dd703d"] = 15000,
+    ["e61758"] = 1000,
+    ["1fafe1"] = 5000,
+    ["6d281b"] = 10000,
 }
-local COIN_ORDER = {15000, 10000, 5000, 1000, 500}
 
--- Firebase functions
-local function getBalance(username)
-  local res = http.get(API_URL .. username)
-  if not res then return nil end
-  local data = textutils.unserializeJSON(res.readAll())
-  res.close()
-  return data and data.coins or 0
+-- === UI State ===
+local PAYOUT_OPTIONS = {500, 1000, 5000, 10000, 15000}
+local selectedValueIndex = 1
+local selectedQty = 1
+local payoutMode = false
+
+-- === Helpers ===
+local function getPlayerFile(player)
+    return "/accounts/" .. player .. ".txt"
 end
 
-local function setBalance(username, amount)
-  local body = textutils.serializeJSON({ coins = amount })
-  http.post(API_URL .. username, body, { ["Content-Type"] = "application/json" })
-end
-
--- Draw text centered
-local function drawCentered(text, y, color)
-  local w, _ = monitor.getSize()
-  local x = math.max(1, math.floor((w - #text) / 2))
-  monitor.setCursorPos(x, y)
-  if color then monitor.setTextColor(color) end
-  monitor.write(text)
-end
-
--- Return nearest player within 8 blocks
-local function getNearestPlayerWithin8()
-  if not radar then return nil end
-  local nearest = nil
-  local minDist = 8
-  for _, player in ipairs(radar.getPlayers() or {}) do
-    if player.x and player.y and player.z then
-      local dist = math.sqrt(player.x^2 + player.y^2 + player.z^2)
-      if dist <= minDist then
-        nearest = player.name
-        minDist = dist
-      end
+local function getBalance(player)
+    local path = getPlayerFile(player)
+    if fs.exists(path) then
+        local f = fs.open(path, "r")
+        local val = tonumber(f.readAll())
+        f.close()
+        return val or 0
     end
-  end
-  return nearest
+    return 0
 end
 
--- Give books from payout chest
-local function giveBooks(amount)
-  local prefixMap = {}
-  for hash, val in pairs(VALID_BOOKS) do
-    prefixMap[val] = hash
-  end
-  for _, denom in ipairs(COIN_ORDER) do
-    while amount >= denom do
-      for slot, item in pairs(payoutChest.list()) do
-        if item.name == "minecraft:written_book" and item.nbtHash then
-          local prefix = string.sub(item.nbtHash, 1, 6)
-          if prefix == prefixMap[denom] then
-            if payoutChest.pushItems(peripheral.getName(withdrawalChest), slot, 1) > 0 then
-              amount = amount - denom
+local function setBalance(player, amount)
+    local f = fs.open(getPlayerFile(player), "w")
+    f.write(tostring(amount))
+    f.close()
+end
+
+local function logTransaction(player, message, change)
+    if not fs.exists("/accounts/logs") then fs.makeDir("/accounts/logs") end
+    local logPath = "/accounts/logs/" .. player .. ".txt"
+    local time = textutils.formatTime(os.time(), true)
+    local newBalance = getBalance(player)
+    local delta = (change >= 0 and "+" or "") .. tostring(change)
+    local entry = "[" .. time .. "] " .. message .. " " .. delta .. " (Balance: " .. newBalance .. ")"
+
+    local lines = {}
+    if fs.exists(logPath) then
+        local file = fs.open(logPath, "r")
+        while true do
+            local line = file.readLine()
+            if not line then break end
+            table.insert(lines, line)
+        end
+        file.close()
+    end
+
+    table.insert(lines, entry)
+    while #lines > 500 do table.remove(lines, 1) end
+
+    local file = fs.open(logPath, "w")
+    for _, line in ipairs(lines) do file.writeLine(line) end
+    file.close()
+end
+
+-- === Deposit Logic ===
+local function processDeposit(player)
+    local total = 0
+    for slot, item in pairs(shulkerBox.list()) do
+        if item.nbtHash then
+            local prefix = string.sub(item.nbtHash, 1, 6)
+            local value = VALID_ITEMS[prefix]
+            if value then
+                local moved = shulkerBox.pushItems(obCN, slot, item.count)
+                total = total + (moved * value)
             end
-            break
-          end
         end
-      end
-      break
     end
-  end
-  return amount
+    if total > 0 then
+        local newBal = getBalance(player) + total
+        setBalance(player, newBal)
+        logTransaction(player, "DEPOSIT: Book tokens deposited", total)
+        return newBal, "? Deposited!"
+    end
+    return getBalance(player), "?? No valid tokens."
 end
 
--- UI State
-local state = "main"
-local selectedPlayer = nil
-local balance = 0
-local selection = { denom = 0, quantity = 0, amount = 0 }
+-- === Payout Logic ===
+local function processPayout(player)
+    local value = PAYOUT_OPTIONS[selectedValueIndex]
+    local qtyToMove = selectedQty
+    local total = value * qtyToMove
+    local bal = getBalance(player)
 
-while true do
-  local prevPlayer = selectedPlayer
-  selectedPlayer = getNearestPlayerWithin8()
+    if bal < total then
+        message = "Insufficient balance."
+        return bal
+    end
 
-  if selectedPlayer ~= prevPlayer then
-    state = "main"
-    selection = { denom = 0, quantity = 0, amount = 0 }
-  end
+    local prefix = nil
+    for k, v in pairs(VALID_ITEMS) do
+        if v == value then
+            prefix = k
+            break
+        end
+    end
+    if not prefix then
+        message = "Token type error."
+        return bal
+    end
 
-  if selectedPlayer then
-    balance = getBalance(selectedPlayer) or 0
-    monitor.setBackgroundColor(colors.black)
-    monitor.clear()
-    monitor.setTextColor(colors.white)
+    local chest = peripheral.wrap(obCN)
+    local movedTotal = 0
 
-    if state == "main" then
-      drawCentered("Welcome to Wavecrest Casino!", 2)
-      drawCentered("[Deposit]", 4, colors.green)
-      drawCentered("[Withdraw]", 6, colors.cyan)
-      local e, _, x, y = os.pullEventTimeout("monitor_touch", 0.5)
-      if e == "monitor_touch" then
-        if y == 4 then
-          local total = 0
-          for _, item in pairs(depositChest.list()) do
-            if item.name == "minecraft:written_book" and item.nbtHash then
-              local prefix = string.sub(item.nbtHash, 1, 6)
-              local value = VALID_BOOKS[prefix]
-              if value then
-                total = total + (item.count * value)
-              end
+    for slot, item in pairs(chest.list()) do
+        if item.nbtHash and string.sub(item.nbtHash, 1, 6) == prefix then
+            while movedTotal < qtyToMove and item.count > 0 do
+                local moved = chest.pushItems(dropper, slot, 1)
+                if moved > 0 then
+                    movedTotal = movedTotal + 1
+                    sleep(0.05)
+                else
+                    break
+                end
             end
-          end
-          if total > 0 then
-            selection.amount = total
-            state = "deposit_confirm"
-          end
-        elseif y == 6 then
-          state = "denomination"
         end
-      end
-
-    elseif state == "deposit_confirm" then
-      drawCentered("Deposit books detected!", 5)
-      drawCentered("[ Confirm ]", 7, colors.green)
-      drawCentered("[ Cancel ]", 9, colors.red)
-      local e, _, _, y = os.pullEventTimeout("monitor_touch", 0.5)
-      if e == "monitor_touch" then
-        if y == 7 then
-          for slot in pairs(depositChest.list()) do
-            depositChest.pushItems(peripheral.getName(payoutChest), slot)
-          end
-          balance = balance + selection.amount
-          setBalance(selectedPlayer, balance)
-          logger.logTransaction(selectedPlayer, "Deposit", selection.amount, balance)
-          monitor.clear()
-          drawCentered("Deposit complete!", 6, colors.green)
-          sleep(2)
-          state = "main"
-          selection = { denom = 0, quantity = 0, amount = 0 }
-        elseif y == 9 then
-          state = "main"
-        end
-      end
-
-    elseif state == "denomination" then
-      drawCentered("Select denomination", 3)
-      local y = 5
-      for _, v in ipairs(COIN_ORDER) do
-        drawCentered("[ " .. v .. " ]", y)
-        y = y + 2
-      end
-      local e, _, _, yClick = os.pullEventTimeout("monitor_touch", 0.5)
-      if e == "monitor_touch" then
-        local map = { [5] = 15000, [7] = 10000, [9] = 5000, [11] = 1000, [13] = 500 }
-        local d = map[yClick]
-        if d then
-          selection.denom = d
-          state = "quantity"
-        end
-      end
-
-    elseif state == "quantity" then
-      drawCentered("Selected: " .. selection.denom .. " coins", 3)
-      drawCentered("Select quantity (1-10)", 5)
-      for i = 1, 10 do
-        monitor.setCursorPos(i * 3, 7)
-        monitor.write("[" .. i .. "]")
-      end
-      local e, _, xClick, yClick = os.pullEventTimeout("monitor_touch", 0.5)
-      if e == "monitor_touch" and yClick == 7 then
-        for i = 1, 10 do
-          if xClick >= i * 3 and xClick <= i * 3 + 2 then
-            selection.quantity = i
-            selection.amount = selection.denom * i
-            state = "confirm"
-            break
-          end
-        end
-      end
-
-    elseif state == "confirm" then
-      drawCentered("Withdraw " .. selection.amount .. " coins?", 5)
-      drawCentered("[ Confirm ]", 7, colors.green)
-      drawCentered("[ Cancel ]", 9, colors.red)
-      local e, _, _, y = os.pullEventTimeout("monitor_touch", 0.5)
-      if e == "monitor_touch" then
-        if y == 7 then
-          if balance >= selection.amount then
-            local leftover = giveBooks(selection.amount)
-            local actual = selection.amount - leftover
-            balance = balance - actual
-            setBalance(selectedPlayer, balance)
-            logger.logTransaction(selectedPlayer, "Withdraw", -actual, balance)
-            monitor.clear()
-            drawCentered("Collect your books", 6, colors.green)
-            sleep(3)
-          else
-            monitor.clear()
-            drawCentered("Insufficient funds", 6, colors.red)
-            sleep(2)
-          end
-          state = "main"
-          selection = { denom = 0, quantity = 0, amount = 0 }
-        elseif y == 9 then
-          state = "main"
-          selection = { denom = 0, quantity = 0, amount = 0 }
-        end
-      end
+        if movedTotal >= qtyToMove then break end
     end
 
-  else
-    monitor.setBackgroundColor(colors.black)
-    monitor.clear()
-    monitor.setTextColor(colors.yellow)
-    drawCentered("Insert books or approach", 6, colors.yellow)
-    sleep(0.5)
-  end
-  sleep(0.1)
+    if movedTotal < qtyToMove then
+        message = "Only moved " .. movedTotal .. "/" .. qtyToMove
+        return bal
+    end
+
+    setBalance(player, bal - total)
+    logTransaction(player, "PAYOUT: " .. qtyToMove .. " x $" .. value, -total)
+    message = "Dispensed " .. qtyToMove .. " x $" .. value
+    return getBalance(player)
 end
+
+-- === Radar Loop ===
+local activePlayer, balance, distance, message = nil, 0, nil, ""
+local smalrad, largerad = 1.75, 4
+
+local function radarLoop()
+    while true do
+        local players = radar.getPlayers()
+        local valP, cP = {}, nil
+        for _, p in ipairs(players) do
+            if p.distance <= largerad then
+                table.insert(valP, p)
+                if p.distance <= smalrad then
+                    if not cP or p.distance < cP.distance then
+                        cP = p
+                    end
+                end 
+            end
+        end
+        if not rip then print("no rip")
+        elseif #valP == 1 and cP then
+            activePlayer = cP.name
+            distance = cP.distance
+            balance = getBalance(activePlayer)
+            rip.setOutput("bottom", true)
+            message = ""
+        elseif #valP == 1 and not cP then
+            activePlayer, distance = nil, nil
+            rip.setOutput("bottom", false)
+            message = "Not Close Enough!"
+        elseif #valP > 1 then
+            activePlayer, distance = nil, nil
+            rip.setOutput("bottom", false)
+            message = "Too Many Players!"
+        else
+            activePlayer, distance = nil, nil
+            rip.setOutput("bottom", false)
+            message = ""
+        end
+        sleep(0.05)
+    end
+end
+
+-- === Rednet Listener ===
+local function rednetListener()
+    while true do
+        local sender, msg = rednet.receive("casino")
+        if type(msg) == "table" then
+            if msg.action == "get_players" then
+                local players = {}
+                for _, name in ipairs(fs.list("/accounts")) do
+                    if name:match("%.txt$") and not name:match("logs") then
+                        table.insert(players, name:gsub("%.txt$", ""))
+                    end
+                end
+                table.sort(players)
+                rednet.send(sender, {action = "players_list", players = players}, "casino")
+
+            elseif msg.action == "get_balance" then
+                rednet.send(sender, {player = msg.player, balance = getBalance(msg.player)}, "casino")
+
+            elseif msg.action == "transfer" then
+                local old = getBalance(msg.player)
+                local new = math.max(0, old + msg.delta)
+                setBalance(msg.player, new)
+                logTransaction(msg.player, msg.note or "Transfer", msg.delta)
+                rednet.send(sender, {player = msg.player, balance = new}, "casino")
+
+            elseif msg.action == "list_accounts" then
+                local files = fs.list("/accounts")
+                local result = {}
+                for _, name in ipairs(files) do
+                    if name:match("%.txt$") and not name:match("logs") then
+                        table.insert(result, name:gsub("%.txt$", ""))
+                    end
+                end
+                rednet.send(sender, {accounts = result}, "casino")
+            end
+        end
+    end
+end
+
+-- === Main Execution ===
+parallel.waitForAny(
+    radarLoop,
+    displayLoop,
+    touchLoop,
+    rednetListener
+)
