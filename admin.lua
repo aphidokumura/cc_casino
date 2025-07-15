@@ -1,153 +1,183 @@
--- Admin Computer for Casino Accounts (Rednet-based)
+-- Casino Admin Panel with Rednet Player List (Rednet ID 8166)
 local monitor = peripheral.wrap("top")
 local modem = peripheral.wrap("bottom")
 rednet.open("bottom")
 
--- Config
-local ACCOUNTS_COMPUTER_ID = 8166
-local MAX_LOG_LINES = 10
-
--- State
+local ACCOUNTS_ID = 8166
 local players = {}
 local selectedPlayer = nil
-local logs = {}
+local currentPage = 1
+local perPage = 12
 local scroll = 0
-local currentBalance = 0
+local logs = {}
+local balance = 0
 
--- Fetch player list from local files
-local function getPlayerList()
-    players = {}
-    for _, name in ipairs(fs.list("/accounts")) do
-        if name:match("%.txt$") and not name:match("logs") then
-            table.insert(players, name:gsub("%.txt$", ""))
-        end
+-- === Request player list from Account Computer ===
+local function requestPlayerList()
+    rednet.send(ACCOUNTS_ID, {action = "get_players"}, "casino")
+    local sender, response = rednet.receive("casino", 3)
+    if sender == ACCOUNTS_ID and response and response.action == "players_list" and response.players then
+        players = response.players
+        table.sort(players)
+        return true
     end
-    table.sort(players)
+    return false
 end
 
--- Ask accounts computer for balance
-local function fetchBalance(player)
-    rednet.send(ACCOUNTS_COMPUTER_ID, { action = "get_balance", player = player }, "casino")
+-- === Request balance for a player ===
+local function requestBalance(player)
+    rednet.send(ACCOUNTS_ID, {action="get_balance", player=player}, "casino")
     local id, res = rednet.receive("casino", 2)
-    if id == ACCOUNTS_COMPUTER_ID and res and res.balance then
-        currentBalance = res.balance
+    if id == ACCOUNTS_ID and res and res.balance then
+        balance = res.balance
     else
-        currentBalance = 0
+        balance = 0
     end
 end
 
--- Ask accounts computer for logs
-local function fetchLogs(player)
-    rednet.send(ACCOUNTS_COMPUTER_ID, { action = "get_logs", player = player }, "casino")
+-- === Request logs for a player ===
+local function requestLogs(player)
+    rednet.send(ACCOUNTS_ID, {action="get_logs", player=player}, "casino")
     local id, res = rednet.receive("casino", 2)
-    if id == ACCOUNTS_COMPUTER_ID and res and res.logs then
+    if id == ACCOUNTS_ID and res and res.logs then
         logs = res.logs
     else
         logs = {}
     end
 end
 
--- UI: Draw main player list
-local function drawMainMenu()
-    monitor.clear()
-    monitor.setCursorPos(2, 1)
-    monitor.write("== Account Viewer ==")
-
-    for i, player in ipairs(players) do
-        monitor.setCursorPos(2, i + 2)
-        monitor.write((selectedPlayer == player and "-> " or "   ") .. player)
+-- === Send balance adjustment ===
+local function sendAdjustment(player, delta)
+    rednet.send(ACCOUNTS_ID, {
+        action = "transfer",
+        player = player,
+        delta = delta,
+        note = "Admin Panel"
+    }, "casino")
+    local id, res = rednet.receive("casino", 2)
+    if id == ACCOUNTS_ID and res and res.balance then
+        balance = res.balance
     end
+    requestLogs(player)
 end
 
--- UI: Draw selected player's details
-local function drawPlayerDetails()
+-- === Drawing functions ===
+local function drawMain()
     monitor.clear()
     monitor.setCursorPos(2, 1)
-    monitor.write("Account: " .. selectedPlayer)
+    monitor.write("== Casino Admin Panel ==")
+
+    local totalPages = math.max(1, math.ceil(#players / perPage))
+    local startIndex = (currentPage - 1) * perPage
+
+    for i = 1, perPage do
+        local idx = startIndex + i
+        local player = players[idx]
+        if player then
+            monitor.setCursorPos(2, i + 2)
+            monitor.write((player == selectedPlayer and "-> " or "   ") .. player)
+        end
+    end
+
+    monitor.setCursorPos(2, 17)
+    monitor.write(string.format("Page %d/%d [Prev] [Next]", currentPage, totalPages))
+end
+
+local function drawPlayerView()
+    monitor.clear()
+    monitor.setCursorPos(2, 1)
+    monitor.write("Player: " .. selectedPlayer)
     monitor.setCursorPos(2, 2)
-    monitor.write("Balance: $" .. currentBalance)
+    monitor.write("Balance: $" .. balance)
     monitor.setCursorPos(2, 3)
     monitor.write("[+100] [-100] [+1000] [-1000] [Back]")
 
     monitor.setCursorPos(2, 5)
     monitor.write("Recent Transactions:")
 
-    for i = 1, MAX_LOG_LINES do
-        local line = logs[i + scroll]
-        if line then
+    for i = 1, 10 do
+        local entry = logs[i + scroll]
+        if entry then
             monitor.setCursorPos(2, i + 5)
-            monitor.write(line:sub(1, 40))
+            monitor.write(entry:sub(1, 40))
         end
     end
 
-    -- Scroll arrows
     monitor.setCursorPos(38, 6)
     monitor.write("^")
     monitor.setCursorPos(38, 15)
     monitor.write("v")
 end
 
--- Send transfer command
-local function adjustBalance(delta)
-    rednet.send(ACCOUNTS_COMPUTER_ID, {
-        action = "transfer",
-        player = selectedPlayer,
-        delta = delta,
-        note = "Admin Console"
-    }, "casino")
-    local id, res = rednet.receive("casino", 2)
-    if id == ACCOUNTS_COMPUTER_ID and res and res.balance then
-        currentBalance = res.balance
-    end
-    fetchLogs(selectedPlayer)
-end
+-- === Touch Handling ===
 
--- Handle screen touches
-local function handleTouch(x, y)
-    if not selectedPlayer then
-        if y >= 3 then
-            local idx = y - 2
-            local name = players[idx]
-            if name then
-                selectedPlayer = name
-                fetchBalance(name)
-                fetchLogs(name)
-                scroll = 0
-            end
+local function handleMainTouch(x, y)
+    local totalPages = math.max(1, math.ceil(#players / perPage))
+    local startIndex = (currentPage - 1) * perPage
+    if y >= 3 and y <= 2 + perPage then
+        local index = startIndex + (y - 2)
+        local player = players[index]
+        if player then
+            selectedPlayer = player
+            requestBalance(player)
+            requestLogs(player)
+            scroll = 0
         end
-    else
-        if y == 3 then
-            if x >= 2 and x <= 6 then adjustBalance(100)
-            elseif x >= 8 and x <= 13 then adjustBalance(-100)
-            elseif x >= 15 and x <= 21 then adjustBalance(1000)
-            elseif x >= 23 and x <= 30 then adjustBalance(-1000)
-            elseif x >= 32 and x <= 37 then
-                selectedPlayer = nil
-                scroll = 0
+    elseif y == 17 then
+        if x >= 9 and x <= 14 then
+            if currentPage > 1 then
+                currentPage = currentPage - 1
             end
-        elseif y == 6 and x >= 38 then
-            scroll = math.max(0, scroll - 1)
-        elseif y == 15 and x >= 38 then
-            if #logs > MAX_LOG_LINES + scroll then
-                scroll = scroll + 1
+        elseif x >= 17 and x <= 22 then
+            if currentPage < totalPages then
+                currentPage = currentPage + 1
             end
         end
     end
 end
 
--- === Start ===
-getPlayerList()
+local function handlePlayerTouch(x, y)
+    if y == 3 then
+        if x >= 2 and x <= 6 then sendAdjustment(selectedPlayer, 100)
+        elseif x >= 8 and x <= 13 then sendAdjustment(selectedPlayer, -100)
+        elseif x >= 15 and x <= 21 then sendAdjustment(selectedPlayer, 1000)
+        elseif x >= 23 and x <= 30 then sendAdjustment(selectedPlayer, -1000)
+        elseif x >= 32 and x <= 37 then
+            selectedPlayer = nil
+            scroll = 0
+            requestPlayerList() -- refresh list when returning
+        end
+    elseif y == 6 and x >= 38 then
+        scroll = math.max(0, scroll - 1)
+    elseif y == 15 and x >= 38 then
+        if #logs > scroll + 10 then
+            scroll = scroll + 1
+        end
+    end
+end
+
+-- === Initialization ===
 monitor.setTextScale(0.5)
+if not requestPlayerList() then
+    print("Failed to get player list from Account Computer.")
+    players = {}
+end
 
+-- === Main loop ===
 while true do
     if selectedPlayer then
-        drawPlayerDetails()
+        drawPlayerView()
     else
-        drawMainMenu()
+        drawMain()
     end
 
-    local e = { os.pullEvent() }
+    local e = {os.pullEvent()}
     if e[1] == "monitor_touch" then
-        handleTouch(e[3], e[4])
+        local x, y = e[3], e[4]
+        if selectedPlayer then
+            handlePlayerTouch(x, y)
+        else
+            handleMainTouch(x, y)
+        end
     end
 end
