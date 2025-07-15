@@ -238,13 +238,20 @@ end
 local function drawBlitBackground()
     if not fs.exists("account_bg.nfv") then return end
     local file = fs.open("account_bg.nfv", "r")
-    local w, h = file.readLine():match("(%d+)%s+(%d+)")
-    for y = 1, tonumber(h) do
+    local header = file.readLine()
+    if not header then file.close() return end
+    local w, h = header:match("(%d+)%s+(%d+)")
+    w, h = tonumber(w), tonumber(h)
+    if not w or not h then file.close() return end
+
+    for y = 1, h do
         local line = file.readLine()
         if line then
             local text, fg, bg = line:match("^(.-)|(.+)|(.+)$")
-            monitor.setCursorPos(1, y)
-            monitor.blit(text, fg, bg)
+            if text and fg and bg and #text == #fg and #fg == #bg then
+                monitor.setCursorPos(1, y)
+                monitor.blit(text, fg, bg)
+            end
         end
     end
     file.close()
