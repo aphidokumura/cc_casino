@@ -1,0 +1,149 @@
+-- Admin Panel for Casino (Rednet ID 8166)
+local monitor = peripheral.wrap("top")
+local modem = peripheral.wrap("bottom")
+rednet.open("bottom")
+
+local ACCOUNTS_ID = 8166
+local selectedPlayer = nil
+local scroll = 0
+local balance = 0
+local logs = {}
+local players = {}
+
+-- === Helpers ===
+
+local function loadPlayerList()
+    players = {}
+    for _, f in ipairs(fs.list("/accounts")) do
+        if f:match("%.txt$") and not f:match("logs") then
+            table.insert(players, f:gsub("%.txt$", ""))
+        end
+    end
+    table.sort(players)
+end
+
+local function requestBalance(player)
+    rednet.send(ACCOUNTS_ID, {action="get_balance", player=player}, "casino")
+    local id, res = rednet.receive("casino", 2)
+    if id == ACCOUNTS_ID and res and res.balance then
+        balance = res.balance
+    else
+        balance = 0
+    end
+end
+
+local function requestLogs(player)
+    rednet.send(ACCOUNTS_ID, {action="get_logs", player=player}, "casino")
+    local id, res = rednet.receive("casino", 2)
+    if id == ACCOUNTS_ID and res and res.logs then
+        logs = res.logs
+    else
+        logs = {}
+    end
+end
+
+local function sendAdjustment(player, delta)
+    rednet.send(ACCOUNTS_ID, {
+        action = "transfer",
+        player = player,
+        delta = delta,
+        note = "Admin Panel"
+    }, "casino")
+    local id, res = rednet.receive("casino", 2)
+    if id == ACCOUNTS_ID and res and res.balance then
+        balance = res.balance
+    end
+    requestLogs(player)
+end
+
+-- === UI Drawing ===
+
+local function drawMain()
+    monitor.clear()
+    monitor.setCursorPos(2, 1)
+    monitor.write("== Casino Admin Panel ==")
+
+    for i, p in ipairs(players) do
+        monitor.setCursorPos(2, i + 2)
+        monitor.write((p == selectedPlayer and "-> " or "   ") .. p)
+    end
+end
+
+local function drawPlayerView()
+    monitor.clear()
+    monitor.setCursorPos(2, 1)
+    monitor.write("Player: " .. selectedPlayer)
+    monitor.setCursorPos(2, 2)
+    monitor.write("Balance: $" .. balance)
+    monitor.setCursorPos(2, 3)
+    monitor.write("[+100] [-100] [+1000] [-1000] [Back]")
+
+    monitor.setCursorPos(2, 5)
+    monitor.write("Transaction Log:")
+
+    for i = 1, 10 do
+        local entry = logs[i + scroll]
+        if entry then
+            monitor.setCursorPos(2, i + 5)
+            monitor.write(entry:sub(1, 40))
+        end
+    end
+
+    monitor.setCursorPos(38, 6)
+    monitor.write("^")
+    monitor.setCursorPos(38, 15)
+    monitor.write("v")
+end
+
+-- === Touch Handling ===
+
+local function handleTouch(x, y)
+    if not selectedPlayer then
+        if y >= 3 then
+            local index = y - 2
+            local name = players[index]
+            if name then
+                selectedPlayer = name
+                requestBalance(name)
+                requestLogs(name)
+                scroll = 0
+            end
+        end
+    else
+        if y == 3 then
+            if x >= 2 and x <= 6 then sendAdjustment(selectedPlayer, 100)
+            elseif x >= 8 and x <= 13 then sendAdjustment(selectedPlayer, -100)
+            elseif x >= 15 and x <= 21 then sendAdjustment(selectedPlayer, 1000)
+            elseif x >= 23 and x <= 30 then sendAdjustment(selectedPlayer, -1000)
+            elseif x >= 32 and x <= 37 then
+                selectedPlayer = nil
+                scroll = 0
+            end
+        elseif y == 6 and x >= 38 then
+            scroll = math.max(0, scroll - 1)
+        elseif y == 15 and x >= 38 then
+            if #logs > scroll + 10 then
+                scroll = scroll + 1
+            end
+        end
+    end
+end
+
+-- === Startup ===
+
+monitor.setTextScale(0.5)
+loadPlayerList()
+
+while true do
+    if selectedPlayer then
+        drawPlayerView()
+    else
+        drawMain()
+    end
+
+    local e = {os.pullEvent()}
+    if e[1] == "monitor_touch" then
+        local x, y = e[3], e[4]
+        handleTouch(x, y)
+    end
+end
