@@ -1,24 +1,4 @@
-local monitor = peripheral.find("monitor")
-local radar = peripheral.find("radar")
-
-if not monitor then error("No monitor attached!") end
-if not radar then error("No radar attached!") end
-
-while true do
-    monitor.setBackgroundColor(colors.black)
-    monitor.clear()
-    monitor.setCursorPos(1,1)
-    monitor.setTextColor(colors.white)
-
-    local players = radar.getPlayers()
-    if players and #players > 0 then
-        monitor.write("Players detected:\n")
-        for _, p in ipairs(players) do
-            monitor.write(string.format("%s (%.1f, %.1f, %.1f)\n", p.name, p.x, p.y, p.z))
-        end
-    else
-        monitor.write("No players detected nearby.\n")
-    end
-
-    sleep(1)
+print("Listing /accounts folder:")
+for _, f in ipairs(fs.list("/accounts")) do
+  print(f)
 end
