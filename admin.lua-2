@@ -65,14 +65,14 @@ local function drawMain()
     monitor.setCursorPos(2, 1)
     monitor.write("== Casino Admin Panel ==")
 
-    local totalPages = math.ceil(#players / perPage)
-    local startIndex = (currentPage - 1) * perPage + 1
+    local totalPages = math.max(1, math.ceil(#players / perPage))
+    local startIndex = (currentPage - 1) * perPage
 
-    for i = 0, perPage - 1 do
+    for i = 1, perPage do
         local idx = startIndex + i
         local player = players[idx]
         if player then
-            monitor.setCursorPos(2, i + 3)
+            monitor.setCursorPos(2, i + 2)
             monitor.write((player == selectedPlayer and "-> " or "   ") .. player)
         end
     end
@@ -122,12 +122,10 @@ local function handleMainTouch(x, y)
         end
     elseif y == 17 then
         if x >= 9 and x <= 14 then
-            -- Prev
             if currentPage > 1 then
                 currentPage = currentPage - 1
             end
         elseif x >= 17 and x <= 22 then
-            -- Next
             local maxPages = math.ceil(#players / perPage)
             if currentPage < maxPages then
                 currentPage = currentPage + 1
