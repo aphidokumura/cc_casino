@@ -1,22 +1,24 @@
--- Admin Panel for Casino (Rednet ID 8166)
+-- Casino Admin Panel with Pagination (Rednet ID 8166)
 local monitor = peripheral.wrap("top")
 local modem = peripheral.wrap("bottom")
 rednet.open("bottom")
 
 local ACCOUNTS_ID = 8166
-local selectedPlayer = nil
-local scroll = 0
-local balance = 0
-local logs = {}
 local players = {}
+local selectedPlayer = nil
+local currentPage = 1
+local perPage = 12
+local scroll = 0
+local logs = {}
+local balance = 0
 
 -- === Helpers ===
 
 local function loadPlayerList()
     players = {}
-    for _, f in ipairs(fs.list("/accounts")) do
-        if f:match("%.txt$") and not f:match("logs") then
-            table.insert(players, f:gsub("%.txt$", ""))
+    for _, name in ipairs(fs.list("/accounts")) do
+        if name:match("%.txt$") and not name:match("logs") then
+            table.insert(players, name:gsub("%.txt$", ""))
         end
     end
     table.sort(players)
@@ -56,17 +58,27 @@ local function sendAdjustment(player, delta)
     requestLogs(player)
 end
 
--- === UI Drawing ===
+-- === Drawing ===
 
 local function drawMain()
     monitor.clear()
     monitor.setCursorPos(2, 1)
     monitor.write("== Casino Admin Panel ==")
 
-    for i, p in ipairs(players) do
-        monitor.setCursorPos(2, i + 2)
-        monitor.write((p == selectedPlayer and "-> " or "   ") .. p)
+    local totalPages = math.ceil(#players / perPage)
+    local startIndex = (currentPage - 1) * perPage + 1
+
+    for i = 0, perPage - 1 do
+        local idx = startIndex + i
+        local player = players[idx]
+        if player then
+            monitor.setCursorPos(2, i + 3)
+            monitor.write((player == selectedPlayer and "-> " or "   ") .. player)
+        end
     end
+
+    monitor.setCursorPos(2, 17)
+    monitor.write(string.format("Page %d/%d [Prev] [Next]", currentPage, totalPages))
 end
 
 local function drawPlayerView()
@@ -79,7 +91,7 @@ local function drawPlayerView()
     monitor.write("[+100] [-100] [+1000] [-1000] [Back]")
 
     monitor.setCursorPos(2, 5)
-    monitor.write("Transaction Log:")
+    monitor.write("Recent Transactions:")
 
     for i = 1, 10 do
         local entry = logs[i + scroll]
@@ -97,34 +109,48 @@ end
 
 -- === Touch Handling ===
 
-local function handleTouch(x, y)
-    if not selectedPlayer then
-        if y >= 3 then
-            local index = y - 2
-            local name = players[index]
-            if name then
-                selectedPlayer = name
-                requestBalance(name)
-                requestLogs(name)
-                scroll = 0
+local function handleMainTouch(x, y)
+    local startIndex = (currentPage - 1) * perPage
+    if y >= 3 and y <= 3 + perPage - 1 then
+        local index = startIndex + (y - 3 + 1)
+        local player = players[index]
+        if player then
+            selectedPlayer = player
+            requestBalance(player)
+            requestLogs(player)
+            scroll = 0
+        end
+    elseif y == 17 then
+        if x >= 9 and x <= 14 then
+            -- Prev
+            if currentPage > 1 then
+                currentPage = currentPage - 1
+            end
+        elseif x >= 17 and x <= 22 then
+            -- Next
+            local maxPages = math.ceil(#players / perPage)
+            if currentPage < maxPages then
+                currentPage = currentPage + 1
             end
         end
-    else
-        if y == 3 then
-            if x >= 2 and x <= 6 then sendAdjustment(selectedPlayer, 100)
-            elseif x >= 8 and x <= 13 then sendAdjustment(selectedPlayer, -100)
-            elseif x >= 15 and x <= 21 then sendAdjustment(selectedPlayer, 1000)
-            elseif x >= 23 and x <= 30 then sendAdjustment(selectedPlayer, -1000)
-            elseif x >= 32 and x <= 37 then
-                selectedPlayer = nil
-                scroll = 0
-            end
-        elseif y == 6 and x >= 38 then
-            scroll = math.max(0, scroll - 1)
-        elseif y == 15 and x >= 38 then
-            if #logs > scroll + 10 then
-                scroll = scroll + 1
-            end
+    end
+end
+
+local function handlePlayerTouch(x, y)
+    if y == 3 then
+        if x >= 2 and x <= 6 then sendAdjustment(selectedPlayer, 100)
+        elseif x >= 8 and x <= 13 then sendAdjustment(selectedPlayer, -100)
+        elseif x >= 15 and x <= 21 then sendAdjustment(selectedPlayer, 1000)
+        elseif x >= 23 and x <= 30 then sendAdjustment(selectedPlayer, -1000)
+        elseif x >= 32 and x <= 37 then
+            selectedPlayer = nil
+            scroll = 0
+        end
+    elseif y == 6 and x >= 38 then
+        scroll = math.max(0, scroll - 1)
+    elseif y == 15 and x >= 38 then
+        if #logs > scroll + 10 then
+            scroll = scroll + 1
         end
     end
 end
@@ -144,6 +170,10 @@ while true do
     local e = {os.pullEvent()}
     if e[1] == "monitor_touch" then
         local x, y = e[3], e[4]
-        handleTouch(x, y)
+        if selectedPlayer then
+            handlePlayerTouch(x, y)
+        else
+            handleMainTouch(x, y)
+        end
     end
 end
