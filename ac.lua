@@ -203,7 +203,7 @@ local function rednetListener()
             if msg.action == "get_players" then
                 local players = {}
                 for _, name in ipairs(fs.list("/accounts")) do
-                    if name:match("%.txt$") and not name:match("logs") then
+                    if name:match("%.txt$") and name ~= "logs" then
                         table.insert(players, name:gsub("%.txt$", ""))
                     end
                 end
@@ -224,7 +224,7 @@ local function rednetListener()
                 local files = fs.list("/accounts")
                 local result = {}
                 for _, name in ipairs(files) do
-                    if name:match("%.txt$") and not name:match("logs") then
+                    if name:match("%.txt$") and name ~= "logs" then
                         table.insert(result, name:gsub("%.txt$", ""))
                     end
                 end
@@ -261,6 +261,44 @@ local function touchLoop()
                     balance, message = processDeposit(activePlayer)
                 end
             end
+        end
+        sleep(0.1)
+    end
+end
+
+-- === Display Loop (Restored) ===
+local function displayLoop()
+    monitor.setTextScale(1)
+    while true do
+        monitor.clear()
+
+        if activePlayer and not payoutMode then
+            monitor.setCursorPos(1, 1)
+            monitor.write("Welcome, " .. activePlayer)
+            monitor.setCursorPos(1, 2)
+            monitor.write("Balance: $" .. balance)
+            monitor.setCursorPos(1, 3)
+            monitor.write("[ Deposit Books ]")
+            monitor.setCursorPos(1, 4)
+            monitor.write("[ Pull Out Books ]")
+            monitor.setCursorPos(1, 5)
+            monitor.write(message or "")
+        elseif activePlayer and payoutMode then
+            monitor.setCursorPos(1, 1)
+            monitor.write("Balance: $" .. balance)
+            monitor.setCursorPos(1, 2)
+            monitor.write("Book: $" .. PAYOUT_OPTIONS[selectedValueIndex])
+            monitor.setCursorPos(1, 3)
+            monitor.write("Qty: " .. selectedQty)
+            monitor.setCursorPos(1, 4)
+            monitor.write("[ Payout ]")
+            monitor.setCursorPos(1, 5)
+            monitor.write("[ Back ]")
+            monitor.setCursorPos(1, 6)
+            monitor.write(message or "")
+        else
+            monitor.setCursorPos(1, 1)
+            monitor.write("Stand on the block...")
         end
         sleep(0.1)
     end
